@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Tata Motors Assistant</title>
+    <style>
+        body {
+            margin: 0;
+            height: 100vh;
+            background-color: #0f172a; /* Dark Blue */
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            font-family: 'Segoe UI', sans-serif;
+            overflow: hidden;
+        }
+
+        /* --- THE AI ORB STYLES --- */
+        .orb-container {
+            position: relative;
+            width: 200px;
+            height: 200px;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+
+        .orb {
+            width: 120px;
+            height: 120px;
+            border-radius: 50%;
+            background: radial-gradient(circle at 30% 30%, #4facfe, #00f2fe);
+            box-shadow: 0 0 60px rgba(0, 242, 254, 0.4);
+            transition: all 0.3s ease;
+            z-index: 2;
+        }
+
+        /* Ripple effect rings */
+        .ring {
+            position: absolute;
+            border-radius: 50%;
+            border: 2px solid rgba(255, 255, 255, 0.1);
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            width: 120px;
+            height: 120px;
+        }
+
+        /* State: Aditi is speaking */
+        .orb.speaking {
+            background: radial-gradient(circle at 30% 30%, #43e97b, #38f9d7); /* Greenish */
+            box-shadow: 0 0 80px rgba(56, 249, 215, 0.6);
+            transform: scale(1.1);
+        }
+
+        /* State: User is speaking (Mic active) */
+        .orb.listening {
+            animation: pulse 1.5s infinite;
+        }
+
+        @keyframes pulse {
+            0% { transform: scale(1); box-shadow: 0 0 30px rgba(0, 242, 254, 0.4); }
+            50% { transform: scale(1.05); box-shadow: 0 0 50px rgba(0, 242, 254, 0.6); }
+            100% { transform: scale(1); box-shadow: 0 0 30px rgba(0, 242, 254, 0.4); }
+        }
+
+        .status {
+            margin-top: 40px;
+            font-size: 1.2rem;
+            opacity: 0.7;
+            letter-spacing: 1px;
+        }
+
+        button {
+            margin-top: 20px;
+            padding: 12px 30px;
+            background: transparent;
+            border: 1px solid rgba(255,255,255,0.3);
+            color: white;
+            border-radius: 30px;
+            cursor: pointer;
+            font-size: 1rem;
+            transition: 0.2s;
+        }
+        button:hover { background: rgba(255,255,255,0.1); }
+
+    </style>
+</head>
+<body>
+
+    <div class="orb-container">
+        <div class="ring" style="width: 160px; height: 160px;"></div>
+        <div class="ring" style="width: 220px; height: 220px;"></div>
+        <div id="aiOrb" class="orb"></div>
+    </div>
+
+    <div id="statusText" class="status">Click Start to Connect</div>
+    <button id="startBtn">Start Call</button>
+
+    <script>
+        const startBtn = document.getElementById('startBtn');
+        const statusText = document.getElementById('statusText');
+        const orb = document.getElementById('aiOrb');
+        
+        let socket;
+        let audioContext;
+        let processor;
+        let inputSource;
+        let nextStartTime = 0;
+
+        startBtn.addEventListener('click', async () => {
+            startBtn.style.display = 'none';
+            statusText.innerText = "Connecting to Aditi...";
+            
+            // 1. Initialize Audio
+            audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 24000 });
+            
+            // 2. Connect WebSocket
+            socket = new WebSocket("wss://electroneutral-unambitious-hoyt.ngrok-free.dev/ws");
+
+            socket.onopen = async () => {
+                statusText.innerText = "Connected. Say Hello!";
+                startMicrophone();
+            };
+
+            socket.onmessage = async (event) => {
+                const msg = JSON.parse(event.data);
+                if (msg.type === 'audio') {
+                    playAudioChunk(msg.data);
+                    visualizeSpeaking();
+                }
+            };
+
+            socket.onclose = () => {
+                statusText.innerText = "Disconnected.";
+                startBtn.style.display = 'block';
+            };
+        });
+
+        // --- MICROPHONE HANDLING ---
+        async function startMicrophone() {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: {
+                    channelCount: 1,
+                    sampleRate: 16000 
+                }});
+                
+                orb.classList.add('listening');
+
+                const micContext = new AudioContext({ sampleRate: 16000 });
+                inputSource = micContext.createMediaStreamSource(stream);
+                
+                // Processor to grab raw audio data
+                processor = micContext.createScriptProcessor(4096, 1, 1);
+                
+                inputSource.connect(processor);
+                processor.connect(micContext.destination);
+
+                processor.onaudioprocess = (e) => {
+                    if (socket && socket.readyState === WebSocket.OPEN) {
+                        const inputData = e.inputBuffer.getChannelData(0);
+                        // Convert Float32 to Int16 (PCM)
+                        const pcmData = floatTo16BitPCM(inputData);
+                        // Encode to Base64
+                        const base64String = arrayBufferToBase64(pcmData);
+                        
+                        socket.send(JSON.stringify({
+                            type: "audio",
+                            data: base64String
+                        }));
+                    }
+                };
+            } catch (err) {
+                console.error("Mic Error:", err);
+                statusText.innerText = "Microphone Access Denied";
+            }
+        }
+
+        // --- AUDIO PLAYBACK ---
+        function playAudioChunk(base64Data) {
+            // Convert Base64 -> ArrayBuffer -> Float32
+            const binaryString = window.atob(base64Data);
+            const len = binaryString.length;
+            const bytes = new Uint8Array(len);
+            for (let i = 0; i < len; i++) {
+                bytes[i] = binaryString.charCodeAt(i);
+            }
+            
+            // Turn Int16 bytes back into audio buffer
+            const int16 = new Int16Array(bytes.buffer);
+            const float32 = new Float32Array(int16.length);
+            for(let i=0; i<int16.length; i++) {
+                float32[i] = int16[i] / 32768;
+            }
+
+            const audioBuffer = audioContext.createBuffer(1, float32.length, 24000);
+            audioBuffer.getChannelData(0).set(float32);
+
+            const source = audioContext.createBufferSource();
+            source.buffer = audioBuffer;
+            source.connect(audioContext.destination);
+            
+            // Queue audio to play smoothly
+            const currentTime = audioContext.currentTime;
+            if (nextStartTime < currentTime) nextStartTime = currentTime;
+            source.start(nextStartTime);
+            nextStartTime += audioBuffer.duration;
+        }
+
+        // --- VISUALIZATIONS ---
+        let speakTimeout;
+        function visualizeSpeaking() {
+            orb.classList.remove('listening');
+            orb.classList.add('speaking');
+            
+            clearTimeout(speakTimeout);
+            speakTimeout = setTimeout(() => {
+                orb.classList.remove('speaking');
+                orb.classList.add('listening');
+            }, 500); // Stop glowing if no audio for 500ms
+        }
+
+        // --- UTILS ---
+        function floatTo16BitPCM(input) {
+            const output = new Int16Array(input.length);
+            for (let i = 0; i < input.length; i++) {
+                const s = Math.max(-1, Math.min(1, input[i]));
+                output[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+            }
+            return output.buffer;
+        }
+
+        function arrayBufferToBase64(buffer) {
+            let binary = '';
+            const bytes = new Uint8Array(buffer);
+            const len = bytes.byteLength;
+            for (let i = 0; i < len; i++) {
+                binary += String.fromCharCode(bytes[i]);
+            }
+            return window.btoa(binary);
+        }
+    </script>
+</body>
+</html>
